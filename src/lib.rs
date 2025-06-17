@@ -2121,23 +2121,31 @@ mod impl_rkyv {
     use super::{NotNan, OrderedFloat};
     use num_traits::float::FloatCore;
     #[cfg(test)]
-    use rkyv::{archived_root, ser::Serializer};
-    use rkyv::{Archive, Deserialize, Fallible, Serialize};
+    use rkyv::api::high::{deserialize, to_bytes};
+    #[cfg(test)]
+    use rkyv::primitive::ArchivedF64;
+    use rkyv::rancor::Fallible;
+    use rkyv::Place;
+    use rkyv::{Archive, Deserialize, Serialize};
 
     #[cfg(test)]
-    type DefaultSerializer = rkyv::ser::serializers::CoreSerializer<16, 16>;
-    #[cfg(test)]
-    type DefaultDeserializer = rkyv::Infallible;
+    use rkyv::rancor::Error;
 
-    impl<T: FloatCore + Archive> Archive for OrderedFloat<T> {
+    impl<T: FloatCore + Archive> Archive for OrderedFloat<T>
+    where
+        T::Archived: rkyv::Portable,
+    {
         type Archived = OrderedFloat<T::Archived>;
 
         type Resolver = T::Resolver;
 
-        unsafe fn resolve(&self, pos: usize, resolver: Self::Resolver, out: *mut Self::Archived) {
-            self.0.resolve(pos, resolver, out.cast())
+        fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+            self.0.resolve(resolver, unsafe { out.cast_unchecked() })
         }
     }
+
+    // Mark OrderedFloat<T> as Portable when T is Portable
+    unsafe impl<T: rkyv::Portable> rkyv::Portable for OrderedFloat<T> {}
 
     impl<T: FloatCore + Serialize<S>, S: Fallible + ?Sized> Serialize<S> for OrderedFloat<T> {
         fn serialize(&self, s: &mut S) -> Result<Self::Resolver, S::Error> {
@@ -2153,15 +2161,21 @@ mod impl_rkyv {
         }
     }
 
-    impl<T: FloatCore + Archive> Archive for NotNan<T> {
+    impl<T: FloatCore + Archive> Archive for NotNan<T>
+    where
+        T::Archived: rkyv::Portable,
+    {
         type Archived = NotNan<T::Archived>;
 
         type Resolver = T::Resolver;
 
-        unsafe fn resolve(&self, pos: usize, resolver: Self::Resolver, out: *mut Self::Archived) {
-            self.0.resolve(pos, resolver, out.cast())
+        fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+            self.0.resolve(resolver, unsafe { out.cast_unchecked() })
         }
     }
+
+    // Mark NotNan<T> as Portable when T is Portable
+    unsafe impl<T: rkyv::Portable> rkyv::Portable for NotNan<T> {}
 
     impl<T: FloatCore + Serialize<S>, S: Fallible + ?Sized> Serialize<S> for NotNan<T> {
         fn serialize(&self, s: &mut S) -> Result<Self::Resolver, S::Error> {
@@ -2181,18 +2195,18 @@ mod impl_rkyv {
         ($main:ident, $float:ty, $rend:ty) => {
             impl PartialEq<$main<$float>> for $main<$rend> {
                 fn eq(&self, other: &$main<$float>) -> bool {
-                    other.eq(&self.0.value())
+                    other.eq(&self.0.to_native())
                 }
             }
             impl PartialEq<$main<$rend>> for $main<$float> {
                 fn eq(&self, other: &$main<$rend>) -> bool {
-                    self.eq(&other.0.value())
+                    self.eq(&other.0.to_native())
                 }
             }
 
             impl PartialOrd<$main<$float>> for $main<$rend> {
                 fn partial_cmp(&self, other: &$main<$float>) -> Option<core::cmp::Ordering> {
-                    self.0.value().partial_cmp(other)
+                    self.0.to_native().partial_cmp(other)
                 }
             }
 
@@ -2200,7 +2214,7 @@ mod impl_rkyv {
                 fn partial_cmp(&self, other: &$main<$rend>) -> Option<core::cmp::Ordering> {
                     other
                         .0
-                        .value()
+                        .to_native()
                         .partial_cmp(self)
                         .map(core::cmp::Ordering::reverse)
                 }
@@ -2247,35 +2261,31 @@ mod impl_rkyv {
     #[test]
     fn test_ordered_float() {
         let float = OrderedFloat(1.0f64);
-        let mut serializer = DefaultSerializer::default();
-        serializer
-            .serialize_value(&float)
-            .expect("failed to archive value");
-        let len = serializer.pos();
-        let buffer = serializer.into_serializer().into_inner();
+        let bytes = to_bytes::<Error>(&float).expect("failed to serialize");
 
-        let archived_value = unsafe { archived_root::<OrderedFloat<f64>>(&buffer[0..len]) };
-        assert_eq!(archived_value, &float);
-        let mut deserializer = DefaultDeserializer::default();
-        let deser_float: OrderedFloat<f64> = archived_value.deserialize(&mut deserializer).unwrap();
-        assert_eq!(deser_float, float);
+        // Direct comparison is possible with PartialEq implementations
+        let archived_ptr = bytes.as_ptr() as *const OrderedFloat<ArchivedF64>;
+        let archived = unsafe { &*archived_ptr };
+        assert_eq!(archived, &float);
+
+        let deserialized: OrderedFloat<f64> =
+            deserialize::<OrderedFloat<f64>, Error>(archived).expect("failed to deserialize");
+        assert_eq!(deserialized, float);
     }
 
     #[test]
     fn test_not_nan() {
         let float = NotNan(1.0f64);
-        let mut serializer = DefaultSerializer::default();
-        serializer
-            .serialize_value(&float)
-            .expect("failed to archive value");
-        let len = serializer.pos();
-        let buffer = serializer.into_serializer().into_inner();
+        let bytes = to_bytes::<Error>(&float).expect("failed to serialize");
 
-        let archived_value = unsafe { archived_root::<NotNan<f64>>(&buffer[0..len]) };
-        assert_eq!(archived_value, &float);
-        let mut deserializer = DefaultDeserializer::default();
-        let deser_float: NotNan<f64> = archived_value.deserialize(&mut deserializer).unwrap();
-        assert_eq!(deser_float, float);
+        // Direct comparison is possible with PartialEq implementations
+        let archived_ptr = bytes.as_ptr() as *const NotNan<ArchivedF64>;
+        let archived = unsafe { &*archived_ptr };
+        assert_eq!(archived, &float);
+
+        let deserialized: NotNan<f64> =
+            deserialize::<NotNan<f64>, Error>(archived).expect("failed to deserialize");
+        assert_eq!(deserialized, float);
     }
 }
 
